@@ -5,6 +5,8 @@ const isEmpty = require('lodash/isEmpty');
 
 const find = require('lodash/find');
 
+const { sendSMS } = require('./smsService');
+
 var serviceAccount = require("./carebox-263b9-firebase-adminsdk-oxkvr-008abb4df6.json");
 
 admin.initializeApp({
@@ -12,25 +14,67 @@ admin.initializeApp({
 });
 
 exports.signUp = functions.https.onCall(async (data, context) => {
-  const { uid, nickName, gender, department, yearsOnJob, phoneNumber } = data;
-  console.log(data);
+  const { nickName, gender, department, yearsOnJob, phoneNumber } = data;
+
+  if(!phoneNumber || !nickName){
+    return {};
+  }
+
   try{
 
-    await admin.auth().updateUser(uid, {displayName: nickName})
+    const user = await admin.auth().createUser({displayName: nickName, phoneNumber});
 
-    const authToken = await admin.auth().createCustomToken(uid);
+    const authToken = await admin.auth().createCustomToken(user.uid);
 
-    await admin.firestore().collection('users').doc(uid).create({
-        uid, nickName, gender, department, yearsOnJob,
+    await admin.firestore().collection('users').doc(user.uid).create({
+        uid: user.uid, nickName, gender, department, yearsOnJob,
         authToken, grade: 1, phoneNumber,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
-    })
+    });
 
-    return {uid, authToken};
+    return {uid: user.uid, authToken};
   }catch(ex){
     console.log('signUp', ex);
   }
-  return {uid};
+  return {};
+});
+
+function getRandomInt(min, max) {
+  min = Math.ceil(min);
+  max = Math.floor(max);
+  return Math.floor(Math.random() * (max - min) + min); //The maximum is exclusive and the minimum is inclusive
+}
+
+exports.requestForVerificationCode = functions.https.onCall(async (data, context) => {
+  const { phoneNumber } = data;
+
+  console.log(phoneNumber);
+
+  if(!phoneNumber){
+    return false;
+  }
+
+  let uid = null;
+  let userStatus = 'NOT_EXIST_USER';
+  try{
+    const user = await admin.auth().getUserByPhoneNumber(phoneNumber);
+    console.log(user);
+    userStatus = 'EXISTING_USER';
+    uid = user.uid;
+  }catch(ex){
+    console.log('requestForVerificationCode', ex);
+  }
+
+  const verificationCode = ('000000' + getRandomInt(0, 999999)).slice(-6);
+
+  const doc = await admin.firestore().collection('verificationCodes').add({
+    phoneNumber,
+    userStatus,
+    verificationCode,
+    uid,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  return {userStatus, verificationId: doc.id};
 });
 
 exports.login = functions.https.onCall(async(data, context) => {
@@ -130,6 +174,53 @@ exports.refeshAuthToken = functions.https.onCall(async (data, context) => {
     return { data: false, reason: JSON.stringify(ex) }
   }
 })
+
+exports.verificationCodeCreatedEvent = functions.firestore.document('verificationCodes/{verificationId}')
+  .onCreate(async(snapshot, context) => {
+    try{
+
+      const { phoneNumber, verificationCode } = snapshot.data();
+
+      // getSenderNumberList();
+      sendSMS(phoneNumber, `케어박스 인증번호는 [${verificationCode}]입니다.`);
+    }catch(ex){
+      console.log('notificationCreatedEvent', ex);
+    }
+  })
+
+  exports.verifyLoginCode = functions.https.onCall(async(data, context) => {
+    try{
+
+      console.log(data);
+
+      if(!data.verificationId || !data.verificationCode){
+        return {status: 'FAIL', reason: 'request data is null'};
+      }
+
+      const doc = await admin.firestore().collection('verificationCodes').doc(data.verificationId).get();
+      if(doc.exists){
+        const {uid, verificationCode, userStatus} = doc.data();
+
+        if(verificationCode == data.verificationCode){
+          if(userStatus === 'EXISTING_USER'){
+            const authToken = await admin.auth().createCustomToken(uid);
+            await admin.firestore().collection('users').doc(uid).update({
+              authToken,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            })
+            return {status: 'OK', uid, authToken};
+          }
+
+          return {status: 'OK'}
+        }
+      }
+
+      return {status: 'FAIL', reason: 'wrong verification'};
+    }catch(ex){
+      console.log('notificationCreatedEvent', ex);
+      return {status: 'FAIL', reason: JSON.stringify(ex)};
+    }
+  })
 
 exports.notificationCreatedEvent = functions.firestore.document('notifications/{notificationId}')
   .onCreate(async(snapshot, context) => {
