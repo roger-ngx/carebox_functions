@@ -16,13 +16,17 @@ admin.initializeApp({
 exports.signUp = functions.https.onCall(async (data, context) => {
   const { nickName, gender, department, yearsOnJob, phoneNumber } = data;
 
+  console.log(data);
+
   if(!phoneNumber || !nickName){
     return {};
   }
 
+  const number = phoneNumber.replace('0', '+82');
+
   try{
 
-    const user = await admin.auth().createUser({displayName: nickName, phoneNumber});
+    const user = await admin.auth().createUser({displayName: nickName, phoneNumber: number});
 
     const authToken = await admin.auth().createCustomToken(user.uid);
 
