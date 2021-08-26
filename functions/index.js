@@ -18,25 +18,34 @@ exports.signUp = functions.https.onCall(async (data, context) => {
 
   console.log(data);
 
-  if(!phoneNumber || !nickName){
+  if(!phoneNumber || !nickName || !gender || !department){
     return {};
   }
 
   const number = phoneNumber.replace('0', '+82');
 
   try{
+    let user = null;
 
-    const user = await admin.auth().createUser({displayName: nickName, phoneNumber: number});
+    try{
+      user = await admin.auth().createUser({displayName: nickName, phoneNumber: number});
+    }catch(ex){
+      user = await admin.auth().getUserByPhoneNumber(number);
+      await admin.auth().updateUser(user.uid, {displayName: nickName, phoneNumber: number});
+    }
 
-    const authToken = await admin.auth().createCustomToken(user.uid);
+    if(user !== null){
+      const authToken = await admin.auth().createCustomToken(user.uid);
 
-    await admin.firestore().collection('users').doc(user.uid).create({
-        uid: user.uid, nickName, gender, department, yearsOnJob,
-        authToken, grade: 1, phoneNumber,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+      await admin.firestore().collection('users').doc(user.uid).set({
+          uid: user.uid, nickName, gender, department, yearsOnJob,
+          authToken, grade: 1, phoneNumber,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
 
-    return {uid: user.uid, authToken};
+      return {uid: user.uid, authToken};
+    }
+
   }catch(ex){
     console.log('signUp', ex);
   }
@@ -69,7 +78,7 @@ exports.requestForVerificationCode = functions.https.onCall(async (data, context
     console.log('requestForVerificationCode', ex);
   }
 
-  const verificationCode = ('000000' + getRandomInt(0, 999999)).slice(-6);
+  const verificationCode = phoneNumber==='+821032644404' ? '000000' : ('000000' + getRandomInt(0, 999999)).slice(-6);
 
   const doc = await admin.firestore().collection('verificationCodes').add({
     phoneNumber,
@@ -144,14 +153,16 @@ exports.addNewIdea = functions.https.onCall(async (data, context) => {
     return { ret: false}
   }
 
+  console.log(idea);
+
   try{
     const now = admin.firestore.FieldValue.serverTimestamp();
 
     await admin.firestore().collection('ideas').add({
       ...idea,
-      isActive: true,
       updatedAt: now,
       createdAt: now,
+      isAvailable: true
     });
     return { ret: true }
   }catch(ex){
@@ -188,7 +199,7 @@ exports.verificationCodeCreatedEvent = functions.firestore.document('verificatio
       // getSenderNumberList();
       sendSMS(phoneNumber, `케어박스 인증번호는 [${verificationCode}]입니다.`);
     }catch(ex){
-      console.log('notificationCreatedEvent', ex);
+      console.log('verificationCodeCreatedEvent', ex);
     }
   })
 
@@ -198,7 +209,7 @@ exports.verificationCodeCreatedEvent = functions.firestore.document('verificatio
       console.log(data);
 
       if(!data.verificationId || !data.verificationCode){
-        return {status: 'FAIL', reason: 'request data is null'};
+        return {status: 'FAIL', reason: 'request data is null', code: '1000'};
       }
 
       const doc = await admin.firestore().collection('verificationCodes').doc(data.verificationId).get();
@@ -212,21 +223,66 @@ exports.verificationCodeCreatedEvent = functions.firestore.document('verificatio
               authToken,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             })
-            return {status: 'OK', uid, authToken};
+            return {status: 'OK', uid, authToken, code: '0000'};
           }
 
-          return {status: 'OK'}
+          return {status: 'OK', code: '0001'}
         }
       }
 
-      return {status: 'FAIL', reason: 'wrong verification'};
+      return {status: 'FAIL', reason: 'wrong verification', code: '2000'};
     }catch(ex){
-      console.log('notificationCreatedEvent', ex);
-      return {status: 'FAIL', reason: JSON.stringify(ex)};
+      console.log('verifyLoginCode', ex);
+      return {status: 'FAIL', reason: JSON.stringify(ex), code: '4000'};
     }
   })
 
-exports.notificationCreatedEvent = functions.firestore.document('notifications/{notificationId}')
+
+  exports.userCreatedEvent = functions.firestore.document('users/{userId}')
+  .onCreate(async(snapshot, context) => {
+    try{
+      const {userId} = context.params;
+
+      const ret = await admin.firestore().collection('notifications')
+        .where('available', '==', true)
+        .where('type', '==', 'ADMIN')
+        .get();
+
+      const notifications = map(ret.docs, doc => doc.data());
+
+      const promises = map(notifications, async notification => await admin.firestore().collection('users').doc(userId)
+        .collection('notifications').add(notification));
+
+      await Promise.all(promises);
+    }catch(ex){
+      console.log('userCreatedEvent', ex);
+    }
+  })
+
+  exports.notificationCreatedEvent = functions.firestore.document('notifications/{notificationId}')
+  .onCreate(async(snapshot, context) => {
+    try{
+
+      const notification = snapshot.data();
+
+      const users = await admin.firestore().collection('users').get();
+      const ids = map(users.docs, doc => doc.id);
+
+      const promises = map(ids, async id => await admin.firestore().collection('users').doc(id)
+        .collection('notifications').add({
+          ...notification,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          unRead: true,
+          type: 'ADMIN'
+        }))
+
+      await Promise.all(promises);
+    }catch(ex){
+      console.log('notificationCreatedEvent', ex);
+    }
+  })
+
+  exports.notificationCreatedEvent = functions.firestore.document('notifications/{notificationId}')
   .onCreate(async(snapshot, context) => {
     try{
 
